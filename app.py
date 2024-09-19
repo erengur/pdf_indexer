@@ -1,167 +1,90 @@
 import streamlit as st
 import PyPDF2
-import pdfplumber
+from io import StringIO, BytesIO
 import re
 import pandas as pd
-from io import StringIO
 
 # Başlık
-st.title("PDF Metin ve Tablo Çıkarıcı")
+st.title("PDF Metin Çıkarıcı ve Cümle İndeksleyici (Excel Formatında)")
 
 # PDF dosyası yükleme
 uploaded_file = st.file_uploader("Lütfen bir PDF dosyası yükleyin", type="pdf")
 
-# Metin ve tabloları kaydetme fonksiyonu
-def save_text_and_tables(relevant_sentences, tables, summary):
+# Metni kaydetme fonksiyonu
+def save_text(text):
     output = StringIO()
-    output.write("=== Çıkarılan İlgili Metinler ===\n")
-    for sentence in relevant_sentences:
-        output.write(sentence + '\n')
-    if tables:
-        output.write("\n=== Çıkarılan Tablolar ===\n")
-        for idx, table in enumerate(tables):
-            output.write(f"\nTablo {idx+1}:\n")
-            output.write(table.to_string(index=False) + '\n')
-    output.write("\n=== Özet ===\n")
-    output.write(summary if summary else "Özet yok.")
+    output.write("=== Çıkarılan Metin ===\n\n")
+    output.write(text)
     return output.getvalue()
 
-# Eğer bir dosya yüklendiyse işlemlere başla
+# Regex tabanlı cümle bölme fonksiyonu
+def split_into_sentences(text):
+    # Cümle sonu işaretlerine göre bölme
+    sentence_endings = re.compile(r'(?<=[.!?])\s+')
+    sentences = sentence_endings.split(text)
+    return sentences
+
+# Ana işlem akışı
 if uploaded_file is not None:
-    # PDF'den metin ve tabloları çıkarın
-    def pdf_to_text_and_tables(pdf_file):
-        try:
-            # Metin çıkarma işlemi
-            reader = PyPDF2.PdfReader(pdf_file)
-            text = ''
-            for page in reader.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + '\n'
-            st.success("PDF metin çıkarma işlemi tamamlandı.")
+    try:
+        # PDF'den metin çıkarma işlemi
+        reader = PyPDF2.PdfReader(uploaded_file)
+        text = ''
+        for page_num, page in enumerate(reader.pages, start=1):
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + '\n'
+        st.success("PDF metin çıkarma işlemi tamamlandı.")
 
-            # Tablo çıkarma işlemi
-            st.info("PDF'den tablolar çıkarılıyor...")
-            tables = []
-            with pdfplumber.open(pdf_file) as pdf:
-                for page_num, page in enumerate(pdf.pages, start=1):
-                    page_tables = page.extract_tables()
-                    if page_tables:
-                        for table in page_tables:
-                            if table and len(table) > 1:
-                                df = pd.DataFrame(table[1:], columns=table[0])
-                                df.columns = clean_column_names(df.columns)
-                                df.insert(0, 'Sayfa Numarası', page_num)
-                                tables.append(df)
-            st.success(f"PDF'den {len(tables)} tablo çıkarıldı.")
-            return text, tables
-        except Exception as e:
-            st.error(f"PDF çıkarma sırasında hata oluştu: {e}")
-            return None, None
+        if text:
+            # Çıkarılan metni cümle cümle indeksleme
+            sentences = split_into_sentences(text)
+            indexed_sentences = [{"Index": i+1, "Sentence": sentence} for i, sentence in enumerate(sentences)]
+            
+            # Veri çerçevesine dönüştürme
+            df = pd.DataFrame(indexed_sentences)
+            
+            # İndekslenmiş cümleleri Excel olarak indirilebilir hale getirme
+            excel_buffer = BytesIO()
+            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False, sheet_name='Sentences')
+            excel_bytes = excel_buffer.getvalue()
 
-    # Sütun isimlerini temizleyen fonksiyon
-    def clean_column_names(columns):
-        new_columns = []
-        column_count = {}
-        for col in columns:
-            if col is None or col == '':
-                col = 'Unnamed'
-            col = str(col).strip()
-            # Tekrarlanan sütun isimlerini sayıyla benzersiz hale getir
-            if col in column_count:
-                column_count[col] += 1
-                col = f"{col}_{column_count[col]}"
-            else:
-                column_count[col] = 1
-            new_columns.append(col)
-        return new_columns
+            # Metni kaydet
+            output_text = save_text(text)
 
-    # Custom Turkish sentence tokenizer
-    def turkish_sentence_tokenizer(text):
-        abbreviations = [
-            'Dr.', 'Prof.', 'Doç.', 'Av.', 'Sn.', 'vs.', 'vb.', 'bkz.', 's.', 'No.'
-        ]
-        placeholder = '__ABBR_PERIOD__'
-        for abbr in abbreviations:
-            text = text.replace(abbr, abbr.replace('.', placeholder))
-        sentences = re.split(r'(?<=[.!?])\s+', text)
-        sentences = [sentence.replace(placeholder, '.') for sentence in sentences]
-        return sentences
+            # İndirme butonlarını üstte gösterme (İki sütun halinde)
+            st.subheader("Çıkarılan Metin ve İndekslenmiş Cümleler")
 
-    # Extract relevant sections
-    def extract_relevant_sections(text):
-        swot_keywords = [
-            'SWOT analysis', 'Strengths', 'Weaknesses', 'Opportunities', 'Threats',
-            'SWOT analizi', 'Güçlü Yönler', 'Zayıf Yönler', 'Fırsatlar', 'Tehditler'
-        ]
-        finance_keywords = [
-            'income', 'expense', 'profit', 'revenue', 'cost', 'loss',
-            'gelir', 'gider', 'kâr', 'maliyet', 'zarar', 'hasılat', 'bütçe', 'mali', 'finans'
-        ]
-        keywords = swot_keywords + finance_keywords
-        escaped_keywords = [re.escape(k) for k in keywords]
-        pattern = re.compile(r'\b(' + '|'.join(escaped_keywords) + r')\b', re.IGNORECASE)
-        sentences = turkish_sentence_tokenizer(text)
-        relevant_sentences = [sentence.strip() for sentence in sentences if pattern.search(sentence)]
-        return relevant_sentences
+            col1, col2 = st.columns(2)
+            with col1:
+                st.download_button(
+                    label="Çıktıyı İndir (output.txt)",
+                    data=output_text,
+                    file_name="output.txt",
+                    mime="text/plain"
+                )
+            with col2:
+                st.download_button(
+                    label="İndekslenmiş Cümleleri İndir (sentences.xlsx)",
+                    data=excel_bytes,
+                    file_name="sentences.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
 
-    # Summarize text
-    def summarize_text_with_textrank(text, sentences_count=5):
-        try:
-            from sumy.parsers.plaintext import PlaintextParser
-            from sumy.summarizers.text_rank import TextRankSummarizer
+            # Çıkarılan metni göster (Madde Madde İndekslenmiş)
+            st.subheader("Çıkarılan Metin")
+            indexed_text = '\n'.join([f"{i}. {sentence}" for i, sentence in enumerate(sentences, start=1)])
+            st.markdown(indexed_text)
 
-            class CustomTurkishTokenizer:
-                def to_sentences(self, text):
-                    return turkish_sentence_tokenizer(text)
+            # İndekslenmiş cümleleri gösterme
+            st.subheader("İndekslenmiş Cümleler")
+            st.dataframe(df, height=400)
+            
+        else:
+            st.warning("PDF dosyasında çıkarılacak metin bulunamadı.")
 
-                def to_words(self, sentence):
-                    words = re.findall(r'\b\w+\b', sentence, flags=re.UNICODE)
-                    return words
-
-            parser = PlaintextParser.from_string(text, CustomTurkishTokenizer())
-            summarizer = TextRankSummarizer()
-            summary_sentences = summarizer(parser.document, sentences_count)
-            summary = ' '.join(str(sentence).strip() for sentence in summary_sentences)
-            st.success("Özetleme işlemi tamamlandı.")
-            return summary
-        except Exception as e:
-            st.error(f"Özetleme sırasında hata oluştu: {e}")
-            return None
-
-    # Metin ve tabloları çıkar
-    pdf_text, pdf_tables = pdf_to_text_and_tables(uploaded_file)
-
-    if pdf_text:
-        # İlgili bölümleri çıkar
-        relevant_sentences = extract_relevant_sections(pdf_text)
-
-        # Tabloları ve metni kaydet
-        relevant_text = ' '.join(relevant_sentences)
-        summary = summarize_text_with_textrank(relevant_text, sentences_count=5)
-        output_text = save_text_and_tables(relevant_sentences, pdf_tables, summary)
-
-        # İndirme butonunu en üste ekleyelim
-        st.download_button(
-            label="Çıktıyı İndir (output.txt)",
-            data=output_text,
-            file_name="output.txt",
-            mime="text/plain"
-        )
-
-        # İlgili cümleleri göster
-        st.write(f"{len(relevant_sentences)} ilgili cümle çıkarıldı.")
-        if relevant_sentences:
-            st.subheader("Çıkarılan İlgili Metinler")
-            for sentence in relevant_sentences:
-                st.write("- " + sentence)
-
-        # Tabloları göster
-        if pdf_tables:
-            st.subheader("Çıkarılan Tablolar")
-            for idx, table in enumerate(pdf_tables):
-                if not table.empty:
-                    st.write(f"**Tablo {idx+1}**")
-                    st.dataframe(table.reset_index(drop=True))
-    else:
-        st.error("PDF'den metin çıkarılamadı.")
+    except Exception as e:
+        st.error(f"PDF işleme sırasında hata oluştu: {e}")
+else:
+    st.info("Lütfen bir PDF dosyası yükleyin.")
